@@ -1,5 +1,7 @@
 #include "SPH.hlsl"
 
+#define SPH_BLOCK_SIZE 512
+
 RWStructuredBuffer<Particle> _Particles;
 
 StructuredBuffer<int2> _SpatialLut;
@@ -28,7 +30,7 @@ float Random(float3 i)
 }
 
 #pragma kernel ParticleDensity
-[numthreads(512, 1, 1)]
+[numthreads(SPH_BLOCK_SIZE, 1, 1)]
 void ParticleDensity(uint3 DTid : SV_DispatchThreadID)
 {
     float3 pos = _Particles[DTid.x].positionPredicted;
@@ -72,8 +74,27 @@ void UpdatePressureForce(int id, float3 pos, float3 velocity, float density, ino
     force += (sharedPressure * dir + viscosityForce * _ViscosityStrength * _PressureMultiplier) * _Mass * slope / curDensity;     
 }
 
+void ResolveCollisions(inout float3 position,inout float3 velocity)
+{
+    if(abs(position.x) > _Bound.x)
+    {
+        position.x = _Bound.x * sign(position.x);
+        velocity.x *= -_CollisionDamping;
+    }
+    if(abs(position.y) > _Bound.y)
+    {
+        position.y = _Bound.y * sign(position.y);
+        velocity.y *= -_CollisionDamping;
+    }
+    if(abs(position.z) > _Bound.z)
+    {
+        position.z = _Bound.z * sign(position.z);
+        velocity.z *= -_CollisionDamping;
+    }
+}
+
 #pragma kernel ParticlePressure
-[numthreads(512, 1, 1)]
+[numthreads(SPH_BLOCK_SIZE, 1, 1)]
 void ParticlePressure(uint3 DTid : SV_DispatchThreadID)
 {
     float3 position = _Particles[DTid.x].positionPredicted;
@@ -96,46 +117,16 @@ void ParticlePressure(uint3 DTid : SV_DispatchThreadID)
         }
     }
     
-    _Particles[DTid.x].velocity = _Particles[DTid.x].velocity + force / _Particles[DTid.x].density * _DeltaTime;
-
-}
-
-void ResolveCollisions(inout float3 position,inout float3 velocity)
-{
-    if(abs(position.x) > _Bound.x)
-    {
-        position.x = _Bound.x * sign(position.x);
-        velocity.x *= -_CollisionDamping;
-    }
-    if(abs(position.y) > _Bound.y)
-    {
-        position.y = _Bound.y * sign(position.y);
-        velocity.y *= -_CollisionDamping;
-    }
-    if(abs(position.z) > _Bound.z)
-    {
-        position.z = _Bound.z * sign(position.z);
-        velocity.z *= -_CollisionDamping;
-    }
-}
-
-
-#pragma kernel ParticleCollision
-[numthreads(512, 1, 1)]
-void ParticleCollision(uint3 DTid : SV_DispatchThreadID)
-{
-    float3 oldVelocity = _Particles[DTid.x].velocity;
-    float3 oldPosition = _Particles[DTid.x].position;
+    velocity += force / density * _DeltaTime;
 
     float th = 2;
-    float3 velocity;
-    velocity.x = min(oldVelocity.x, th);
-    velocity.y = min(oldVelocity.y, th);
-    velocity.z = min(oldVelocity.z, th);
+    velocity.x = min(velocity.x, th);
+    velocity.y = min(velocity.y, th);
+    velocity.z = min(velocity.z, th);
     
-    float3 position = oldPosition + velocity * _DeltaTime;
-    ResolveCollisions(position, velocity);
+    float3 curPosition = _Particles[DTid.x].position + velocity * _DeltaTime;
+    ResolveCollisions(inout curPosition, inout velocity);
 
     _Particles[DTid.x].velocity = velocity;
-    _Particles[DTid.x].position = position;
+    _Particles[DTid.x].position = curPosition;
 }
