@@ -1,0 +1,30 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+// RWStructureBuffer<int> Values;
+int groupWidth;
+int groupHeight;
+
+[numthreads(128,1,1)]
+void CSMain(uint3 id :SV_DispatchThreadID)
+{
+    // // Calculate the indices of the pair of values to consider swapping
+    // //(please excuse the messy math -- I'm sure I'm missing a much more elegant way to do this...)
+    // uint i = id.x;
+    // uint h = i & (groupWidth - 1);
+    // uint indexLow = h + (groupHeight + 1) * (i / groupWidth);
+    // uint indexHigh = indexLow + (stepIndex == 0 ? groupHeight - 2 * h : (groupHeight + 1) / 2);
+    // // Exit if out of bounds(required for non-power of 2 input sizes)
+    // if(indexHigh >= numValues)return;
+    // //Get the actual values of the pair
+    // int valueLow = Values[indexLow];
+    // int valueHigh = Values[indexHigh];
+    // //Swap if pair is incorrectly ordered
+    // if(valueLow > valueHigh)
+    // {
+    //     Values[indexLow]= valueHigh;
+    //     Values[indexHigh]= valueLow;
+    // }
+}

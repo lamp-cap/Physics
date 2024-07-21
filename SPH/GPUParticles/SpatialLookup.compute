@@ -1,0 +1,16 @@
+#include "SPH.hlsl"
+
+StructuredBuffer<Particle> _ParticleBuffer;
+
+RWStructuredBuffer<int2> _SpatialLut;
+RWStructuredBuffer<uint> _StartIndices;
+
+#pragma kernel CSMain
+[numthreads(512, 1, 1)]
+void CSMain (uint3 DTid : SV_DispatchThreadID)
+{
+    int3 cellCoord = PositionToCellcoord(_ParticleBuffer[DTid.x].position);
+    uint cellKey = GetKeyFromCellcoord(cellCoord);
+    _SpatialLut[DTid.x] = int2(DTid.x, cellKey);
+    _StartIndices[DTid.x] = 0x7FFFFFFF;
+}

@@ -1,0 +1,141 @@
+#include "SPH.hlsl"
+
+RWStructuredBuffer<Particle> _Particles;
+
+StructuredBuffer<int2> _SpatialLut;
+StructuredBuffer<uint> _StartIndices;
+
+int _Count;
+float _Radius;
+uint _Length;
+float _Mass;
+float _SmoothRadius;
+float _DeltaTime;
+float3 _Bound;
+float _CollisionDamping;
+float _ViscosityStrength;
+int _PressureMultiplier;
+
+const int3[] _Offsets = {
+    int3(-1,-1, 0), int3(-1, 0, 0), int3(-1, 1, 0),
+    int3(0, -1, 0), int3(0,  1, 0), int3(1,  1, 0),
+    int3(1, -1, 0), int3(1,  0, 0), int3(0,  0, 0)
+};
+
+float Random(float3 i)
+{
+    return 1;
+}
+
+#pragma kernel ParticleDensity
+[numthreads(512, 1, 1)]
+void ParticleDensity(uint3 DTid : SV_DispatchThreadID)
+{
+    float3 pos = _Particles[DTid.x].positionPredicted;
+    float density = 0;
+    int3 coord = PositionToCellcoord(pos, _Radius);
+    for (int i = 0; i < 9; ++i)
+    {
+        uint key = GetKeyFromCellcoord(coord + _Offsets[i], _Length);
+        int startIndex = _StartIndices[key];
+        [loop(20)]
+        for(int j = startIndex; j < _Length; j++)
+        {
+            if(_SpatialLut[j].x != key) break;
+            int index = _SpatialLut[j].y;
+            if (curID == index) continue;
+            
+            float dst = length(_Particles[index].positionPredicted - pos);
+            float influence = SmoothKernel(_SmoothRadius, dst);
+            density += _Mass * influence;
+        }
+    }
+
+    _Particles[DTid.x].density = max(0.001f, density);
+}
+
+void UpdatePressureForce(int id, float3 pos, float3 velocity, float density, inout float3 force)
+{
+    float3 dir = _Particles[id].positionPredicted - pos;
+    float dst = length(dir);
+
+    if(dst > _SmoothRadius * _SmoothRadius * 1.1f) return;
+
+    dir = dst < 0.0001f ? float3(Random(dir), Random(dir * dst), 0) : normalize(dir);
+    
+    float influence = ViscositySmoothingKernel(_SmoothRadius, dst);
+    float viscosityForce = (velocity - _Particles[id].velocity) * influence;
+
+    float slope = SmoothKernelDerivative(_SmoothRadius, dst);
+    float curDensity = _Particles[id].density;
+    float sharedPressure = (ConvertDensityToPressure(curDensity) + ConvertDensityToPressure(density)) * 0.5;
+    force += (sharedPressure * dir + viscosityForce * _ViscosityStrength * _PressureMultiplier) * _Mass * slope / curDensity;     
+}
+
+#pragma kernel ParticlePressure
+[numthreads(512, 1, 1)]
+void ParticlePressure(uint3 DTid : SV_DispatchThreadID)
+{
+    float3 position = _Particles[DTid.x].positionPredicted;
+    float3 velocity = _Particles[DTid].velocity;
+    float density = _Particles[DTid].density;
+    float3 force = 0;
+    
+    int3 coord = PositionToCellcoord(position, _Radius);
+    for (int i = 0; i < 9; ++i)
+    {
+        uint key = GetKeyFromCellcoord(coord + _Offsets[i], _Length);
+        int startIndex = _StartIndices[key];
+        [loop(20)]
+        for(int j = startIndex; j < _Length; j++)
+        {
+            if(_SpatialLut[j].x != key) break;
+            int index = _SpatialLut[j].y;
+            if (DTid.x == index) continue;
+            UpdatePressureForce(index, position, velocity, density, inout force);
+        }
+    }
+    
+    _Particles[DTid.x].velocity = _Particles[DTid.x].velocity + force / _Particles[DTid.x].density * _DeltaTime;
+
+}
+
+void ResolveCollisions(inout float3 position,inout float3 velocity)
+{
+    if(abs(position.x) > _Bound.x)
+    {
+        position.x = _Bound.x * sign(position.x);
+        velocity.x *= -_CollisionDamping;
+    }
+    if(abs(position.y) > _Bound.y)
+    {
+        position.y = _Bound.y * sign(position.y);
+        velocity.y *= -_CollisionDamping;
+    }
+    if(abs(position.z) > _Bound.z)
+    {
+        position.z = _Bound.z * sign(position.z);
+        velocity.z *= -_CollisionDamping;
+    }
+}
+
+
+#pragma kernel ParticleCollision
+[numthreads(512, 1, 1)]
+void ParticleCollision(uint3 DTid : SV_DispatchThreadID)
+{
+    float3 oldVelocity = _Particles[DTid.x].velocity;
+    float3 oldPosition = _Particles[DTid.x].position;
+
+    float th = 2;
+    float3 velocity;
+    velocity.x = min(oldVelocity.x, th);
+    velocity.y = min(oldVelocity.y, th);
+    velocity.z = min(oldVelocity.z, th);
+    
+    float3 position = oldPosition + velocity * _DeltaTime;
+    ResolveCollisions(position, velocity);
+
+    _Particles[DTid.x].velocity = velocity;
+    _Particles[DTid.x].position = position;
+}
