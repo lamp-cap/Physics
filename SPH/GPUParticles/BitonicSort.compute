@@ -1,0 +1,83 @@
+#define THREADS 256
+#define BITONIC_BLOCK_SIZE 512
+#define TRANSPOSE_BLOCK_SIZE 16
+
+int _Level;
+int _LevelMask;
+int _Width;
+int _Height;
+
+RWStructuredBuffer<int2> _Data;
+StructuredBuffer<int2> _Input;
+//RWStructuredBuffer<float2>Debug;
+
+groupshared int2 shared_data[BITONIC_BLOCK_SIZE];
+groupshared int2 transpose_shared_data[TRANSPOSE_BLOCK_SIZE * TRANSPOSE_BLOCK_SIZE];
+
+#pragma kernel BitonicSort
+[numthreads(BITONIC_BLOCK_SIZE, 1, 1)]
+void BitonicSort(int3 Gid : SV_GroupID, int3 DTid : SV_DispatchThreadID, int3 GTid : SV_GroupThreadID, int GI : SV_GroupIndex)
+{
+	// Load shared data
+	shared_data[GI] = _Data[DTid.x];
+	GroupMemoryBarrierWithGroupSync();
+
+	for (int j = _Level >> 1; j > 0; j >>= 1)
+	{
+		int2 result = ((shared_data[GI & ~j].x <= shared_data[GI | j].x) == (bool)(_LevelMask & DTid.x)) ?
+			 shared_data[GI ^ j] : shared_data[GI];
+		GroupMemoryBarrierWithGroupSync();
+		shared_data[GI] = result;
+		GroupMemoryBarrierWithGroupSync();
+	}
+
+	_Data[DTid.x] = shared_data[GI];
+	
+
+}
+
+#pragma kernel MatrixTranspose
+[numthreads(TRANSPOSE_BLOCK_SIZE, TRANSPOSE_BLOCK_SIZE, 1)]
+void MatrixTranspose(int3 Gid : SV_GroupID, int3 DTid : SV_DispatchThreadID, int3 GTid : SV_GroupThreadID, int GI : SV_GroupIndex)
+{
+	transpose_shared_data[GI] = _Input[DTid.y * _Width + DTid.x];
+	GroupMemoryBarrierWithGroupSync();
+	int2 XY = DTid.yx - GTid.yx + GTid.xy;
+	_Data[XY.y * _Height + XY.x] = transpose_shared_data[GTid.x * TRANSPOSE_BLOCK_SIZE + GTid.y];
+}
+
+
+#pragma kernel Fill
+[numthreads(THREADS, 1, 1)]
+void Fill(int DTid : SV_DispatchThreadID)
+{
+	_Data[DTid] = DTid < _Width ? _Input[DTid] : 0x7FFFFFFF;
+}
+
+#pragma kernel Copy
+[numthreads(THREADS, 1, 1)]
+void Copy(int DTid : SV_DispatchThreadID)
+{
+	if (DTid < _Width)
+		_Data[DTid] = _Input[DTid];
+}
+
+StructuredBuffer<int2> _SpatialLut;
+RWStructuredBuffer<int> _StartIndices;
+
+#pragma kernel GetIndices
+[numthreads(512, 1, 1)]
+void GetIndices (int3 DTid : SV_DispatchThreadID)
+{
+	int curIndex = (_Width >> 1) - 1;
+	int result = -1;
+	for (int i = _Width >> 2; i > 0; i >>= 1)
+	{
+		if(_SpatialLut[curIndex].x >= DTid.x) curIndex -= i;
+		else if(_SpatialLut[curIndex].x < DTid.x) curIndex += i;
+	}
+	if (_SpatialLut[curIndex].x == DTid.x) result = curIndex;
+	else if (_SpatialLut[curIndex + 1].x == DTid.x) result = curIndex + 1;
+	
+	_StartIndices[DTid.x] = result;
+}

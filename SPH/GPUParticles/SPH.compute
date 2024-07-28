@@ -1,0 +1,191 @@
+#include "SPH.hlsl"
+
+#define SPH_BLOCK_SIZE 512
+
+RWStructuredBuffer<Particle> _Particles;
+
+StructuredBuffer<int2> _SpatialLut;
+StructuredBuffer<int> _StartIndices;
+
+// int _Count;
+float _Radius;
+uint _Length;
+float _Mass;
+float _DeltaTime;
+float3 _Bound;
+float _CollisionDamping;
+float _ViscosityStrength;
+int _PressureMultiplier;
+float _TargetDensity;
+
+static const int3 _Offsets[27] = {
+    int3(-1, -1, -1), int3(-1, -1, 0), int3(-1, -1, 1),
+    int3(-1, 0, -1), int3(-1, 0, 0), int3(-1, 0, 1),
+    int3(-1, 1, -1), int3(-1, 1, 0), int3(-1, 1, 1),
+    int3(0, -1, -1), int3(0, -1, 0), int3(0, -1, 1),
+    int3(0, 0, -1), int3(0, 0, 0), int3(0, 0, 1),
+    int3(0, 1, -1), int3(0, 1, 0), int3(0, 1, 1),
+    int3(1, -1, -1), int3(1, -1, 0), int3(1, -1, 1),
+    int3(1, 0, -1), int3(1, 0, 0), int3(1, 0, 1),
+    int3(1, 1, -1), int3(1, 1, 0), int3(1, 1, 1)
+};
+// static const int3 _Offsets[9] = {
+//     int3(-1, -1, 0),
+//     int3(-1, 0, 0),
+//     int3(-1, 1, 0),
+//     int3(0, -1, 0),
+//     int3(0, 0, 0), 
+//     int3(0, 1, 0), 
+//     int3(1, -1, 0),
+//     int3(1, 0, 0), 
+//     int3(1, 1, 0), 
+// };
+
+
+float Random(float2 i)
+{
+    const float f = dot(float2(12.9898, 78.233), float2(i.x, i.y));
+    return frac(43758.5453 * sin(f));
+}
+
+float ConvertDensityToPressure(float density)
+{
+    float densityError = density - _TargetDensity;
+    float pressure = densityError * _PressureMultiplier;
+    // float nearPressure = densityError * nearPressureMultiplier;
+    return pressure;
+}
+
+float3 _Pos;
+RWStructuredBuffer<int> _Result;
+
+#pragma kernel Lut
+[numthreads(1, 1, 1)]
+void Lut(uint3 DTid : SV_DispatchThreadID)
+{
+    int curIndex = 0;
+    const float3 pos = _Pos;
+    const int3 coord = PositionToCellCoord(pos, _Radius);
+    for (int i = 0; i < 9; ++i)
+    {
+        int key = GetKeyFromCellCoord(coord + _Offsets[i], _Length);
+        int startIndex = _StartIndices[key];
+        if(startIndex < 0) continue;
+        for(int j = startIndex; j < _Length && j < startIndex + 64; j++)
+        {
+            if(_SpatialLut[j].x != key || curIndex > 64) break;
+            int index = _SpatialLut[j].y;
+            // if (DTid.x == index) continue;
+            _Result[curIndex++] = index;
+            // const float dst = length(_Particles[index].position + _Particles[index].velocity * PREDICT_STEP - pos);
+            // const float influence = SmoothKernel(_Radius, dst);
+            // density += _Mass * influence;
+        }
+    }
+}
+
+#pragma kernel ParticleDensity
+[numthreads(SPH_BLOCK_SIZE, 1, 1)]
+void ParticleDensity(uint3 DTid : SV_DispatchThreadID)
+{
+    const float3 pos = _Particles[DTid.x].position + _Particles[DTid.x].velocity * PREDICT_STEP;
+    float density = 0;
+    const int3 coord = PositionToCellCoord(pos, _Radius);
+    for (int i = 0; i < 27; ++i)
+    {
+        const int key = GetKeyFromCellCoord(coord + _Offsets[i], _Length);
+        const int startIndex = _StartIndices[key];
+        if(startIndex < 0) continue;
+        for(int j = startIndex; j < _Length && j < startIndex + 128; j++)
+        {
+            if(_SpatialLut[j].x != key) break;
+            const int index = _SpatialLut[j].y;
+            if (DTid.x == index) continue;
+
+            const float dst = length(_Particles[index].position + _Particles[index].velocity * PREDICT_STEP - pos);
+            const float influence = SmoothKernel(_Radius, dst);
+            density += _Mass * influence;
+        }
+    }
+
+    _Particles[DTid.x].density = max(0.01f, density);
+}
+
+float3 UpdatePressureForce(int id, float3 pos, float3 velocity, float density)
+{
+    float3 dir = _Particles[id].position + _Particles[id].velocity * PREDICT_STEP - pos;
+    const float dst = length(dir);
+
+    if(dst > _Radius * _Radius * 1.1f) return 0;
+
+    dir = dst < 0.0001f ? float3(Random(pos + id)*2-1, Random(id+density)*2-1, 0) : normalize(dir);
+
+    const float influence = ViscositySmoothingKernel(_Radius, dst);
+    const float3 viscosityForce = (velocity - _Particles[id].velocity) * influence;
+
+    const float slope = SmoothKernelDerivative(_Radius, dst);
+    const float curDensity = _Particles[id].density;
+    const float sharedPressure = (ConvertDensityToPressure(curDensity) + ConvertDensityToPressure(density)) * 0.5f;
+    return (sharedPressure * dir + _ViscosityStrength * _PressureMultiplier * viscosityForce) * (_Mass * slope / curDensity);     
+}
+
+void ResolveCollisions(inout float3 position, inout float3 velocity)
+{
+    if(abs(position.x) > _Bound.x)
+    {
+        position.x = _Bound.x * sign(position.x);
+        // position *= 0.99f;
+        velocity.x *= -_CollisionDamping;
+    }
+    if(abs(position.y) > _Bound.y)
+    {
+        position.y = _Bound.y * sign(position.y);
+        // position *= 0.99f;
+        velocity.y *= -_CollisionDamping;
+    }
+    if(abs(position.z) > _Bound.z)
+    {
+        position.z = _Bound.z * sign(position.z);
+        // position *= 0.99f;
+        velocity.z *= -_CollisionDamping;
+    }
+}
+
+#pragma kernel ParticlePressure
+[numthreads(SPH_BLOCK_SIZE, 1, 1)]
+void ParticlePressure(uint3 DTid : SV_DispatchThreadID)
+{
+    const float3 position = _Particles[DTid.x].position + _Particles[DTid.x].velocity * PREDICT_STEP;
+    float3 velocity = _Particles[DTid.x].velocity;
+    const float density = _Particles[DTid.x].density;
+    float3 force = 0;
+    
+    const int3 coord = PositionToCellCoord(position, _Radius);
+    for (int i = 0; i < 27; ++i)
+    {
+        const int key = GetKeyFromCellCoord(coord + _Offsets[i], _Length);
+        const int startIndex = _StartIndices[key];
+        if(startIndex < 0) continue;
+        
+        for(int j = startIndex; j < _Length && j < startIndex + 128; j++)
+        {
+            if(_SpatialLut[j].x != key) break;
+            const int index = _SpatialLut[j].y;
+            if (DTid.x == index) continue;
+            force += UpdatePressureForce(index, position, velocity, density);
+        }
+    }
+    
+    velocity += _DeltaTime * force / density;
+    
+    const float th = 30;
+    velocity.x = clamp(velocity.x, -th, th);
+    velocity.y = clamp(velocity.y, -th, th);
+    velocity.z = clamp(velocity.z, -th, th);
+    
+    float3 curPosition = _Particles[DTid.x].position + velocity * _DeltaTime;
+    ResolveCollisions(curPosition, velocity);
+    
+    _Particles[DTid.x].velocity = velocity;
+    _Particles[DTid.x].position = curPosition;
+}

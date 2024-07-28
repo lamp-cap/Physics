@@ -1,0 +1,27 @@
+#include "SPH.hlsl"
+
+#define SPH_BLOCK_SIZE 512
+
+RWStructuredBuffer<Particle> _Particles;
+RWStructuredBuffer<int2> _SpatialLut;
+
+float _Gravity;
+float _DeltaTime;
+float _Radius;
+uint _Length;
+
+#pragma kernel SpatialLUT
+[numthreads(SPH_BLOCK_SIZE, 1, 1)]
+void SpatialLUT (uint3 DTid : SV_DispatchThreadID)
+{
+    float3 velocity = _Particles[DTid.x].velocity + float3(0, -1, 0) * (_Gravity * _DeltaTime);
+    float3 position = _Particles[DTid.x].position + velocity * PREDICT_STEP;
+
+    int3 cellCoord = PositionToCellCoord(position, _Radius);
+    int cellKey = GetKeyFromCellCoord(cellCoord, _Length);
+    
+    _SpatialLut[DTid.x] = int2(cellKey, DTid.x);
+    _Particles[DTid.x].velocity = velocity;
+}
+
+
